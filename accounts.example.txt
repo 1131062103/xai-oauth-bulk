@@ -1,0 +1,6 @@
+# One account per line. Supported formats:
+#   email:password
+#   email,password
+# Lines starting with # are ignored.
+user1@example.com:YourPassword1
+user2@example.com,YourPassword2

@@ -1,0 +1,26 @@
+# Dual-mode bulk xAI OAuth login for CLIProxyAPI.
+# Copy to config.yaml and fill in values. Do not commit secrets.
+
+mode: api  # api | standalone
+
+# --- api mode: CLIProxyAPI management server must be running ---
+cpa_base_url: http://127.0.0.1:8317
+cpa_management_key: ""  # config.yaml management-key / secret
+
+# --- accounts ---
+accounts_file: accounts.txt
+
+# --- standalone output / optional api local mirror ---
+out_dir: output/auths
+skip_existing: true
+
+# --- browser ---
+headless: false          # headed recommended (Cloudflare)
+proxy: ""                # e.g. http://127.0.0.1:7890
+chrome_path: ""          # optional absolute path to chrome.exe
+browser_timeout_sec: 240
+sleep_between_sec: 3
+workers: 1               # keep 1 for serial isolation
+
+# --- credential defaults (standalone write / probe) ---
+base_url: https://cli-chat-proxy.grok.com/v1
