@@ -136,6 +136,7 @@ def poll_device_token(
     s = _session(proxy)
     deadline = time.time() + max(expires_in - 5, 30)
     sleep_for = max(interval, 1)
+    waiting_logged = False
     while time.time() < deadline:
         if cancel and cancel():
             raise OAuthDeviceError("cancelled")
@@ -170,7 +171,10 @@ def poll_device_token(
         if err in ("authorization_pending", "slow_down"):
             if err == "slow_down":
                 sleep_for = min(sleep_for + 5, 30)
-            log(f"oauth poll: {err} (sleep {sleep_for}s)")
+                log(f"OAuth poll slowed down; retrying in {sleep_for}s")
+            elif not waiting_logged:
+                log("waiting for browser authorization")
+                waiting_logged = True
             time.sleep(sleep_for)
             continue
         if err in ("expired_token", "access_denied"):

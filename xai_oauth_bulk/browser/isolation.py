@@ -32,7 +32,6 @@ class IsolatedBrowser:
         if self.profile_dir and os.path.isdir(self.profile_dir):
             try:
                 shutil.rmtree(self.profile_dir, ignore_errors=True)
-                log(f"removed profile {self.profile_dir}")
             except Exception as e:
                 log(f"profile cleanup: {e}")
 
@@ -118,7 +117,6 @@ def create_isolated_browser(
     if browser_bin:
         try:
             opts.set_browser_path(browser_bin)
-            log(f"browser path={browser_bin}")
         except Exception:
             pass
 
@@ -126,7 +124,6 @@ def create_isolated_browser(
         # Chromium expects host:port or scheme://host:port
         try:
             opts.set_argument(f"--proxy-server={proxy}")
-            log(f"browser proxy={proxy}")
         except Exception as e:
             log(f"set proxy failed: {e}")
 
@@ -145,7 +142,7 @@ def create_isolated_browser(
                 page = browser.new_tab()
             if page is None:
                 raise RuntimeError("chromium started but page is None")
-            log(f"isolated chromium started attempt={attempt} profile={profile_dir}")
+            log(f"isolated Chromium started (attempt {attempt})")
             return IsolatedBrowser(browser=browser, page=page, profile_dir=profile_dir)
         except Exception as e:
             last_err = e

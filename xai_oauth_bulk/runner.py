@@ -47,6 +47,20 @@ def _append_fail_log(path: Path, record: dict[str, Any]) -> None:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def _record_failure(path: Path, result: JobResult) -> None:
+    if result.ok or result.skipped:
+        return
+    _append_fail_log(
+        path,
+        {
+            "email": result.email,
+            "mode": result.mode,
+            "error": result.error,
+            "ts": datetime.now(tz=timezone.utc).isoformat(),
+        },
+    )
+
+
 def run_one_standalone(account: Account, cfg: Config, log: LogFn) -> JobResult:
     email = account.email
     out_dir = Path(cfg.out_dir).expanduser().resolve()
@@ -64,12 +78,7 @@ def run_one_standalone(account: Account, cfg: Config, log: LogFn) -> JobResult:
 
     try:
         sess = request_device_code(proxy=proxy)
-        log(
-            _log_prefix(
-                email,
-                f"device user_code={sess.user_code} expires_in={sess.expires_in}",
-            )
-        )
+        log(_log_prefix(email, "device authorization started; opening browser"))
 
         def _poll() -> None:
             try:
@@ -141,11 +150,6 @@ def run_one_standalone(account: Account, cfg: Config, log: LogFn) -> JobResult:
 def run_one_api(account: Account, cfg: Config, log: LogFn) -> JobResult:
     email = account.email
     out_dir = Path(cfg.out_dir).expanduser().resolve()
-    if cfg.skip_existing:
-        existing = existing_auth_path(out_dir, email)
-        if existing:
-            log(_log_prefix(email, f"skip existing local mirror {existing}"))
-            return JobResult(email=email, ok=True, mode="api", path=str(existing), skipped=True)
 
     if not (cfg.cpa_management_key or "").strip():
         return JobResult(
@@ -170,12 +174,7 @@ def run_one_api(account: Account, cfg: Config, log: LogFn) -> JobResult:
     try:
         start = client.start_xai_oauth()
         state = start.state
-        log(
-            _log_prefix(
-                email,
-                f"CPA started state={state} user_code={start.user_code} url={start.url[:80]}",
-            )
-        )
+        log(_log_prefix(email, "CPA device authorization started; opening browser"))
 
         def _poll_status() -> None:
             try:
@@ -266,22 +265,55 @@ def run_batch(cfg: Config, log: LogFn | None = None) -> list[JobResult]:
         fail_log = Path.cwd() / fail_log
 
     results: list[JobResult] = []
+    if cfg.mode == "api" and cfg.skip_existing:
+        log("CPA precheck: listing existing xAI credential files")
+        try:
+            existing_names = CPAClient(
+                cfg.cpa_base_url,
+                cfg.cpa_management_key,
+                proxy=(cfg.proxy or "").strip() or None,
+            ).list_xai_auth_file_names()
+        except CPAClientError as e:
+            error = f"CPA precheck failed: unable to list auth files: {e}"
+            log(error)
+            results = [
+                JobResult(email=acc.email, ok=False, mode="api", error=error)
+                for acc in accounts
+            ]
+            for result in results:
+                _record_failure(fail_log, result)
+            log(f"batch done ok=0 skipped=0 failed={len(results)} total={len(results)}")
+            return results
+
+        pending_accounts = []
+        for acc in accounts:
+            name = credential_file_name(acc.email)
+            if name in existing_names:
+                log(_log_prefix(acc.email, "skipped"))
+                results.append(
+                    JobResult(
+                        email=acc.email,
+                        ok=True,
+                        mode="api",
+                        path=f"CPA:{name}",
+                        skipped=True,
+                    )
+                )
+            else:
+                pending_accounts.append(acc)
+        log(
+            f"CPA precheck: found {len(existing_names)} xAI credentials; "
+            f"skipped {len(results)} accounts"
+        )
+        accounts = pending_accounts
+
     worker_fn = run_one_api if cfg.mode == "api" else run_one_standalone
 
     if cfg.workers <= 1:
         for i, acc in enumerate(accounts):
             r = worker_fn(acc, cfg, log)
             results.append(r)
-            if not r.ok and not r.skipped:
-                _append_fail_log(
-                    fail_log,
-                    {
-                        "email": r.email,
-                        "mode": r.mode,
-                        "error": r.error,
-                        "ts": datetime.now(tz=timezone.utc).isoformat(),
-                    },
-                )
+            _record_failure(fail_log, r)
             if i + 1 < len(accounts) and cfg.sleep_between_sec > 0:
                 time.sleep(cfg.sleep_between_sec)
     else:
@@ -290,16 +322,7 @@ def run_batch(cfg: Config, log: LogFn | None = None) -> list[JobResult]:
             for fut in as_completed(futs):
                 r = fut.result()
                 results.append(r)
-                if not r.ok and not r.skipped:
-                    _append_fail_log(
-                        fail_log,
-                        {
-                            "email": r.email,
-                            "mode": r.mode,
-                            "error": r.error,
-                            "ts": datetime.now(tz=timezone.utc).isoformat(),
-                        },
-                    )
+                _record_failure(fail_log, r)
 
     ok_n = sum(1 for r in results if r.ok and not r.skipped)
     skip_n = sum(1 for r in results if r.skipped)

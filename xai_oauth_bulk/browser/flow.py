@@ -149,7 +149,7 @@ def approve_device_code(
         except Exception:
             user_code = ""
 
-    log(f"open device url: {verification_uri_complete}")
+    log("opening device authorization page")
     try:
         page.get(verification_uri_complete, timeout=60)
     except TypeError:
@@ -159,21 +159,14 @@ def approve_device_code(
     deadline = time.time() + timeout_sec
     phase = "device"
     login_attempts = 0
-    last_url = ""
 
     while time.time() < deadline:
         if stop_event is not None and stop_event.is_set():
-            log("stop_event set — leave browser loop")
+            log("authorization completed; closing browser")
             return
 
         url = _page_url(page)
         text = _visible_text(page)
-        if url != last_url:
-            log(f"url: {url[:180]}")
-            last_url = url
-            snip = _norm(text)[:160]
-            if snip:
-                log(f"visible: {snip}")
 
         if "device/done" in url or "设备已授权" in text or "device authorized" in text.lower():
             log("device done page — waiting for token poll")

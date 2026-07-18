@@ -27,11 +27,14 @@ Default concurrency is **serial + headed** (most reliable with Cloudflare).
 
 Requires CLIProxyAPI up with management key configured.
 
-1. `GET /v0/management/xai-auth-url`
-2. Browser completes device login
-3. Poll `GET /v0/management/get-auth-status?state=...` until `ok`
-4. CPA writes the auth file into its own `auth-dir`
-5. On failure: `DELETE /v0/management/oauth-session?state=...`
+1. When `skip_existing` is enabled, `GET /v0/management/auth-files` once and skip exact matching `xai-<email>.json` files already held by CPA
+2. `GET /v0/management/xai-auth-url` for each remaining account
+3. Browser completes device login
+4. Poll `GET /v0/management/get-auth-status?state=...` until `ok`
+5. CPA writes the auth file into its own `auth-dir`
+6. On failure: `DELETE /v0/management/oauth-session?state=...`
+
+CPA is the authority for API-mode duplicate detection. If its auth-file inventory cannot be read, the batch stops before any browser or OAuth session starts. Use `--no-skip-existing` only when intentionally reauthorizing accounts; it bypasses this precheck.
 
 Auth headers (both accepted by CPA):
 
@@ -91,6 +94,9 @@ python run.py --mode standalone --accounts accounts.txt --email user@example.com
 
 # limit first N
 python run.py --mode standalone --accounts accounts.txt --limit 5
+
+# intentionally bypass existing-credential checks
+python run.py --mode api --accounts accounts.txt --no-skip-existing
 ```
 
 Also: `python -m xai_oauth_bulk ...` from this directory.
@@ -116,7 +122,7 @@ Per account the tool:
 | Path | Description |
 | --- | --- |
 | `output/auths/xai-*.json` | standalone credentials |
-| `output/auths/.api-ok-*.txt` | api mode local success markers |
+| `output/auths/.api-ok-*.txt` | api mode local success markers (not used to detect CPA credentials) |
 | `output/failed.jsonl` | failed jobs |
 
 ## Disclaimer

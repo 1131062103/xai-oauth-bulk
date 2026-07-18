@@ -118,6 +118,23 @@ class CPAClient:
             return "error", err
         return "wait", ""
 
+    def list_xai_auth_file_names(self) -> set[str]:
+        """Return the names of xAI credential files known to CPA."""
+        body = self._get("/v0/management/auth-files")
+        files = body.get("files")
+        if not isinstance(files, list):
+            raise CPAClientError("auth-files response missing files list")
+
+        names: set[str] = set()
+        for item in files:
+            if not isinstance(item, dict):
+                continue
+            file_type = str(item.get("type") or item.get("provider") or "").strip().lower()
+            name = item.get("name")
+            if file_type == "xai" and isinstance(name, str) and name.strip():
+                names.add(name.strip())
+        return names
+
     def cancel_oauth_session(self, state: str) -> None:
         """DELETE /v0/management/oauth-session?state=..."""
         if not state:
@@ -139,15 +156,18 @@ class CPAClient:
     ) -> None:
         log = log or _noop
         deadline = time.time() + max(timeout_sec, 30.0)
+        waiting_logged = False
         while time.time() < deadline:
             if cancel and cancel():
                 raise CPAClientError("cancelled")
             status, err = self.get_auth_status(state)
             if status == "ok":
-                log("CPA auth status: ok")
+                log("CPA authorization completed")
                 return
             if status == "error":
                 raise CPAClientError(err or "authentication failed")
-            log(f"CPA auth status: wait")
+            if not waiting_logged:
+                log("waiting for CPA authorization")
+                waiting_logged = True
             time.sleep(max(interval_sec, 0.5))
         raise CPAClientError("timed out waiting for CPA OAuth completion")

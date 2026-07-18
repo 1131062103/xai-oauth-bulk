@@ -12,7 +12,9 @@ accounts_file: accounts.txt
 
 # --- standalone output / optional api local mirror ---
 out_dir: output/auths
+# api: check CPA xai-<email>.json files once before the batch; standalone: check out_dir
 skip_existing: true
+fail_log: output/failed.jsonl
 
 # --- browser ---
 headless: false          # headed recommended (Cloudflare)
