@@ -6,7 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from .config import load_config
+from .config import load_config, validate_config
 from .runner import run_batch
 
 
@@ -18,6 +18,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--config", default="", help="Path to config.yaml")
     p.add_argument("--mode", choices=["api", "standalone"], default=None)
     p.add_argument("--accounts", dest="accounts_file", default=None)
+    p.add_argument("--account-source", choices=["file", "register"], default=None)
+    p.add_argument("--enable-registration", dest="registration_enabled", action="store_true", default=None)
+    p.add_argument("--register-count", type=int, default=None)
+    p.add_argument("--registration-timeout-sec", type=float, default=None)
+    p.add_argument("--mailbox-provider", choices=["cloudflare", "duckmail", "yyds"], default=None)
+    p.add_argument("--account-ledger", dest="account_ledger_path", default=None)
     p.add_argument("--out-dir", dest="out_dir", default=None)
     p.add_argument("--cpa-base-url", dest="cpa_base_url", default=None)
     p.add_argument("--cpa-management-key", dest="cpa_management_key", default=None)
@@ -50,6 +56,12 @@ def main(argv: list[str] | None = None) -> int:
     for key in (
         "mode",
         "accounts_file",
+        "account_source",
+        "registration_enabled",
+        "register_count",
+        "registration_timeout_sec",
+        "mailbox_provider",
+        "account_ledger_path",
         "out_dir",
         "cpa_base_url",
         "cpa_management_key",
@@ -86,12 +98,15 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         cfg = load_config(cfg_path or None, **overrides)
+        if cfg.account_source == "register" and args.accounts_file is not None:
+            raise ValueError("--accounts is not supported with account_source=register")
+        validate_config(cfg)
     except Exception as e:
         print(f"config error: {e}", file=sys.stderr)
         return 2
 
-    # Resolve relative accounts/out paths against tool root when not absolute
-    if not Path(cfg.accounts_file).is_absolute():
+    # Resolve relative paths against the tool root when appropriate.
+    if cfg.account_source == "file" and not Path(cfg.accounts_file).is_absolute():
         cand = tool_root / cfg.accounts_file
         if cand.is_file() or not (Path.cwd() / cfg.accounts_file).is_file():
             cfg.accounts_file = str(cand)
@@ -99,6 +114,8 @@ def main(argv: list[str] | None = None) -> int:
         cfg.out_dir = str(tool_root / cfg.out_dir)
     if not Path(cfg.fail_log).is_absolute():
         cfg.fail_log = str(tool_root / cfg.fail_log)
+    if not Path(cfg.account_ledger_path).is_absolute():
+        cfg.account_ledger_path = str(tool_root / cfg.account_ledger_path)
 
     results = run_batch(cfg)
     failed = [r for r in results if not r.ok]

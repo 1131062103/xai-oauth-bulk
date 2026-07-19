@@ -1,28 +1,86 @@
-# Dual-mode bulk xAI OAuth login for CLIProxyAPI.
-# Copy to config.yaml and fill in values. Do not commit secrets.
+# xAI OAuth bulk login for CLIProxyAPI.
+# Copy this file to config.yaml, fill in local values, and do not commit it.
 
-mode: api  # api | standalone
+# =============================================================================
+# OAuth mode
+# =============================================================================
+mode: api # api | standalone
 
-# --- api mode: CLIProxyAPI management server must be running ---
+# API mode requires a running CLIProxyAPI management server.
 cpa_base_url: http://127.0.0.1:8317
-cpa_management_key: ""  # config.yaml management-key / secret
+cpa_management_key: ""
 
-# --- accounts ---
+# =============================================================================
+# Existing-account input (account_source: file)
+# =============================================================================
 accounts_file: accounts.txt
 
-# --- standalone output / optional api local mirror ---
-out_dir: output/auths
-# api: check CPA xai-<email>.json files once before the batch; standalone: check out_dir
+# In API mode, skip exact xai-<email>.json files found on CPA.
+# In standalone mode, skip matching files already present in out_dir.
 skip_existing: true
+
+# =============================================================================
+# Local output
+# =============================================================================
+out_dir: output/auths
 fail_log: output/failed.jsonl
 
-# --- browser ---
-headless: false          # headed recommended (Cloudflare)
-proxy: ""                # e.g. http://127.0.0.1:7890
-chrome_path: ""          # optional absolute path to chrome.exe
-browser_timeout_sec: 240
-sleep_between_sec: 3
-workers: 1               # keep 1 for serial isolation
-
-# --- credential defaults (standalone write / probe) ---
+# Standalone credential default.
 base_url: https://cli-chat-proxy.grok.com/v1
+
+# =============================================================================
+# Browser and batch execution
+# =============================================================================
+# Keep headed + serial execution for Cloudflare / Turnstile reliability.
+headless: false
+workers: 1
+sleep_between_sec: 3
+browser_timeout_sec: 240
+
+proxy: ""       # e.g. http://127.0.0.1:7890
+chrome_path: "" # optional absolute Chrome/Chromium executable path
+
+# =============================================================================
+# Authorized account registration (account_source: register)
+# =============================================================================
+# Registration is disabled by default and is only for accounts you are explicitly
+# authorized to create and manage. Registration currently requires workers: 1.
+account_source: file          # file | register
+registration_enabled: false   # must be true with account_source: register
+register_count: 0             # required unless --limit is supplied
+registration_timeout_sec: 300
+
+# Successful registration credentials are saved as soon as browser sign-up
+# finishes (not only after OAuth). Treat both files as secrets:
+#   - accounts.jsonl              structured ledger (status=registered|oauth_ok)
+#   - accounts-registered.txt     email:password lines for reuse with file mode
+account_ledger_path: output/accounts.jsonl
+
+# =============================================================================
+# Temporary mailbox verification
+# =============================================================================
+mailbox_provider: "" # cloudflare | duckmail | yyds
+mailbox_poll_timeout_sec: 180
+mailbox_poll_interval_sec: 3
+mailbox_max_retries: 2
+
+# Cloudflare Temp Mail-compatible provider.
+# Supply an authorized endpoint and credential for your deployment.
+cloudflare_api_base: "" # e.g. https://mail.example.internal
+cloudflare_api_key: ""
+cloudflare_auth_mode: none # none | bearer | x-api-key | x-admin-auth | query-key
+cloudflare_path_domains: /api/domains
+cloudflare_path_accounts: /api/new_address
+cloudflare_path_token: /api/token
+cloudflare_path_messages: /api/mails
+
+# DuckMail provider.
+duckmail_api_base: https://api.duckmail.su
+duckmail_api_key: ""
+
+# YYDS provider.
+yyds_api_base: ""
+yyds_api_key: ""
+yyds_jwt: ""
+yyds_preferred_domains: "" # optional comma-separated domain names
+yyds_blocked_domains: ""   # optional comma-separated domain names

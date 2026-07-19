@@ -5,18 +5,23 @@ from __future__ import annotations
 import json
 import threading
 import time
+from dataclasses import asdict, dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+import requests
+
+from .account_ledger import append_account_ledger, save_registered_account
 from .accounts import Account, filter_accounts, parse_accounts_file
-from .browser.flow import approve_device_code
+from .browser.flow import approve_device_code, register_account
 from .browser.isolation import create_isolated_browser
 from .config import Config
 from .cpa_client import CPAClient, CPAClientError
+from .mailbox import MailboxService
 from .oauth_device import OAuthDeviceError, poll_device_token, request_device_code
+from .registration import build_registration_profile
 from .schema import build_cpa_xai_auth, credential_file_name
 from .writer import existing_auth_path, write_cpa_xai_auth
 
@@ -59,6 +64,29 @@ def _record_failure(path: Path, result: JobResult) -> None:
             "ts": datetime.now(tz=timezone.utc).isoformat(),
         },
     )
+
+
+def _registration_mailbox_service(cfg: Config) -> MailboxService:
+    values = asdict(cfg)
+    values["email_provider"] = cfg.mailbox_provider
+    session = requests.Session()
+    proxy = (cfg.proxy or "").strip()
+    if proxy:
+        session.proxies.update({"http": proxy, "https": proxy})
+    return MailboxService(values, session=session)
+
+
+def _provision_registration_mailbox(cfg: Config, log: LogFn) -> tuple[MailboxService, Any]:
+    service = _registration_mailbox_service(cfg)
+    last_error: Exception | None = None
+    for attempt in range(1, cfg.mailbox_max_retries + 1):
+        try:
+            return service, service.provision()
+        except Exception as e:  # noqa: BLE001
+            last_error = e
+            if attempt < cfg.mailbox_max_retries:
+                log(f"mailbox provisioning retry {attempt + 1}/{cfg.mailbox_max_retries}")
+    raise last_error or RuntimeError("mailbox provisioning failed")
 
 
 def run_one_standalone(account: Account, cfg: Config, log: LogFn) -> JobResult:
@@ -239,8 +267,284 @@ def run_one_api(account: Account, cfg: Config, log: LogFn) -> JobResult:
             ib.close(log=lambda m: log(_log_prefix(email, m)))
 
 
+def run_one_registered_standalone(cfg: Config, log: LogFn) -> JobResult:
+    """Create one authorized account, then complete the standalone OAuth flow."""
+    email = "registration"
+    proxy = (cfg.proxy or "").strip() or None
+    ib = None
+    stop_event = threading.Event()
+    token_box: dict[str, Any] = {}
+    err_box: dict[str, BaseException] = {}
+    try:
+        mailbox_service, mailbox = _provision_registration_mailbox(cfg, log)
+        email = mailbox.address
+        profile = build_registration_profile()
+        account = Account(email=email, password=profile.password)
+        log(_log_prefix(email, "mailbox provisioned; starting device authorization"))
+        sess = request_device_code(proxy=proxy)
+
+        def _poll() -> None:
+            try:
+                time.sleep(1)
+                tr = poll_device_token(
+                    sess.device_code,
+                    token_endpoint=sess.token_endpoint,
+                    interval=max(sess.interval, 5),
+                    expires_in=min(
+                        sess.expires_in,
+                        int(cfg.registration_timeout_sec + cfg.browser_timeout_sec) + 60,
+                    ),
+                    log=lambda m: log(_log_prefix(email, m)),
+                    proxy=proxy,
+                    cancel=lambda: stop_event.is_set() and "token" not in token_box,
+                )
+                token_box["token"] = tr
+                stop_event.set()
+            except BaseException as e:  # noqa: BLE001
+                err_box["err"] = e
+                stop_event.set()
+
+        poll_thread = threading.Thread(target=_poll, name=f"oauth-register-poll-{email}", daemon=True)
+        poll_thread.start()
+        ib = create_isolated_browser(
+            headless=cfg.headless,
+            proxy=proxy,
+            chrome_path=cfg.chrome_path,
+            log=lambda m: log(_log_prefix(email, m)),
+        )
+        registered = register_account(
+            ib.page,
+            email=email,
+            password=profile.password,
+            first_name=profile.first_name,
+            last_name=profile.last_name,
+            display_name=profile.display_name,
+            verification_code=lambda: mailbox_service.wait_for_code(
+                mailbox,
+                timeout_sec=cfg.mailbox_poll_timeout_sec,
+                poll_interval_sec=cfg.mailbox_poll_interval_sec,
+                log=lambda message: log(_log_prefix(email, message)),
+            ),
+            start_url=sess.verification_uri_complete,
+            timeout_sec=cfg.registration_timeout_sec,
+            stop_event=stop_event,
+            log=lambda m: log(_log_prefix(email, m)),
+        )
+        if not registered:
+            raise OAuthDeviceError("registration did not complete")
+        # Persist email/password as soon as sign-up succeeds so a later OAuth
+        # failure does not lose the newly created account credentials.
+        ledger_path, creds_txt = save_registered_account(
+            ledger_path=cfg.account_ledger_path,
+            email=email,
+            profile=profile,
+            mode="standalone",
+            status="registered",
+        )
+        log(
+            _log_prefix(
+                email,
+                f"saved credentials status=registered ledger={ledger_path} accounts_txt={creds_txt}",
+            )
+        )
+        # Session is already authenticated from registration; do not reload the
+        # device URI or the post-signup Continue → Allow handoff is lost.
+        approve_device_code(
+            ib.page,
+            verification_uri_complete=sess.verification_uri_complete,
+            email=account.email,
+            password=account.password,
+            user_code=sess.user_code,
+            timeout_sec=cfg.browser_timeout_sec,
+            stop_event=stop_event,
+            log=lambda m: log(_log_prefix(email, m)),
+            reopen=False,
+        )
+        poll_thread.join(timeout=max(cfg.browser_timeout_sec, 60) + 30)
+        if "token" not in token_box:
+            if "err" in err_box:
+                raise err_box["err"]
+            raise OAuthDeviceError("token poll ended without result")
+        tr = token_box["token"]
+        payload = build_cpa_xai_auth(
+            email=email,
+            access_token=tr.access_token,
+            refresh_token=tr.refresh_token,
+            id_token=tr.id_token,
+            expires_in=tr.expires_in,
+            base_url=cfg.base_url,
+            token_endpoint=sess.token_endpoint,
+        )
+        path = write_cpa_xai_auth(cfg.out_dir, payload)
+        append_account_ledger(
+            cfg.account_ledger_path,
+            email=email,
+            profile=profile,
+            mode="standalone",
+            oauth_path=str(path),
+            status="oauth_ok",
+        )
+        log(_log_prefix(email, f"registration and OAuth completed oauth_path={path}"))
+        return JobResult(email=email, ok=True, mode="standalone", path=str(path))
+    except Exception as e:  # noqa: BLE001
+        log(_log_prefix(email, f"FAILED: {e}"))
+        return JobResult(email=email, ok=False, mode="standalone", error=str(e))
+    finally:
+        stop_event.set()
+        if ib is not None:
+            ib.close(log=lambda m: log(_log_prefix(email, m)))
+
+
+def run_one_registered_api(cfg: Config, log: LogFn) -> JobResult:
+    """Create one authorized account, then complete CPA-managed OAuth."""
+    email = "registration"
+    if not (cfg.cpa_management_key or "").strip():
+        return JobResult(email=email, ok=False, mode="api", error="cpa_management_key is required for api mode")
+    proxy = (cfg.proxy or "").strip() or None
+    client = CPAClient(cfg.cpa_base_url, cfg.cpa_management_key, proxy=proxy)
+    ib = None
+    state = ""
+    stop_event = threading.Event()
+    status_box: dict[str, Any] = {}
+    err_box: dict[str, BaseException] = {}
+    try:
+        mailbox_service, mailbox = _provision_registration_mailbox(cfg, log)
+        email = mailbox.address
+        profile = build_registration_profile()
+        account = Account(email=email, password=profile.password)
+        start = client.start_xai_oauth()
+        state = start.state
+        log(_log_prefix(email, "mailbox provisioned; starting CPA authorization"))
+
+        def _poll_status() -> None:
+            try:
+                client.wait_auth_status(
+                    state,
+                    timeout_sec=max(cfg.registration_timeout_sec + cfg.browser_timeout_sec, 60) + 30,
+                    interval_sec=2.0,
+                    log=lambda m: log(_log_prefix(email, m)),
+                    cancel=lambda: stop_event.is_set() and "ok" not in status_box,
+                )
+                status_box["ok"] = True
+                stop_event.set()
+            except BaseException as e:  # noqa: BLE001
+                err_box["err"] = e
+                stop_event.set()
+
+        poll_thread = threading.Thread(target=_poll_status, name=f"cpa-register-poll-{email}", daemon=True)
+        poll_thread.start()
+        ib = create_isolated_browser(
+            headless=cfg.headless,
+            proxy=proxy,
+            chrome_path=cfg.chrome_path,
+            log=lambda m: log(_log_prefix(email, m)),
+        )
+        registered = register_account(
+            ib.page,
+            email=email,
+            password=profile.password,
+            first_name=profile.first_name,
+            last_name=profile.last_name,
+            display_name=profile.display_name,
+            verification_code=lambda: mailbox_service.wait_for_code(
+                mailbox,
+                timeout_sec=cfg.mailbox_poll_timeout_sec,
+                poll_interval_sec=cfg.mailbox_poll_interval_sec,
+                log=lambda message: log(_log_prefix(email, message)),
+            ),
+            start_url=start.url,
+            timeout_sec=cfg.registration_timeout_sec,
+            stop_event=stop_event,
+            log=lambda m: log(_log_prefix(email, m)),
+        )
+        if not registered:
+            raise CPAClientError("registration did not complete")
+        # Save credentials immediately after browser registration succeeds.
+        ledger_path, creds_txt = save_registered_account(
+            ledger_path=cfg.account_ledger_path,
+            email=email,
+            profile=profile,
+            mode="api",
+            status="registered",
+        )
+        log(
+            _log_prefix(
+                email,
+                f"saved credentials status=registered ledger={ledger_path} accounts_txt={creds_txt}",
+            )
+        )
+        # Keep the authenticated registration tab; Continue → Allow is in-session.
+        approve_device_code(
+            ib.page,
+            verification_uri_complete=start.url,
+            email=account.email,
+            password=account.password,
+            user_code=start.user_code,
+            timeout_sec=cfg.browser_timeout_sec,
+            stop_event=stop_event,
+            log=lambda m: log(_log_prefix(email, m)),
+            reopen=False,
+        )
+        poll_thread.join(timeout=max(cfg.browser_timeout_sec, 60) + 60)
+        if "ok" not in status_box:
+            if "err" in err_box:
+                raise err_box["err"]
+            raise CPAClientError("CPA status poll ended without success")
+        out_dir = Path(cfg.out_dir).expanduser().resolve()
+        marker = out_dir / f".api-ok-{credential_file_name(email).replace('.json', '')}.txt"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        marker.write_text(
+            f"ok\nemail={email}\nstate={state}\nat={datetime.now(tz=timezone.utc).isoformat()}\n",
+            encoding="utf-8",
+        )
+        oauth_ref = f"CPA:{credential_file_name(email)}"
+        append_account_ledger(
+            cfg.account_ledger_path,
+            email=email,
+            profile=profile,
+            mode="api",
+            oauth_path=oauth_ref,
+            status="oauth_ok",
+        )
+        log(_log_prefix(email, f"registration and CPA OAuth completed oauth_path={oauth_ref}"))
+        return JobResult(email=email, ok=True, mode="api", path=str(marker))
+    except Exception as e:  # noqa: BLE001
+        log(_log_prefix(email, f"FAILED: {e}"))
+        if state:
+            client.cancel_oauth_session(state)
+        return JobResult(email=email, ok=False, mode="api", error=str(e))
+    finally:
+        stop_event.set()
+        if ib is not None:
+            ib.close(log=lambda m: log(_log_prefix(email, m)))
+
+
 def run_batch(cfg: Config, log: LogFn | None = None) -> list[JobResult]:
     log = log or (lambda m: print(m, flush=True))
+    fail_log = Path(cfg.fail_log).expanduser()
+    if not fail_log.is_absolute():
+        fail_log = Path.cwd() / fail_log
+
+    if cfg.account_source == "register":
+        count = cfg.limit or cfg.register_count
+        log(
+            f"registration batch start mode={cfg.mode} count={count} workers={cfg.workers} "
+            f"headless={cfg.headless}"
+        )
+        log("CPA precheck: not applicable to dynamically provisioned registration emails")
+        register_one = run_one_registered_api if cfg.mode == "api" else run_one_registered_standalone
+        results: list[JobResult] = []
+        for index in range(count):
+            result = register_one(cfg, log)
+            results.append(result)
+            _record_failure(fail_log, result)
+            if index + 1 < count and cfg.sleep_between_sec > 0:
+                time.sleep(cfg.sleep_between_sec)
+        ok_n = sum(1 for result in results if result.ok and not result.skipped)
+        fail_n = sum(1 for result in results if not result.ok)
+        log(f"batch done ok={ok_n} skipped=0 failed={fail_n} total={len(results)}")
+        return results
+
     accounts_path = Path(cfg.accounts_file).expanduser()
     if not accounts_path.is_absolute():
         accounts_path = Path.cwd() / accounts_path
@@ -259,10 +563,6 @@ def run_batch(cfg: Config, log: LogFn | None = None) -> list[JobResult]:
         f"batch start mode={cfg.mode} count={len(accounts)} workers={cfg.workers} "
         f"headless={cfg.headless}"
     )
-
-    fail_log = Path(cfg.fail_log).expanduser()
-    if not fail_log.is_absolute():
-        fail_log = Path.cwd() / fail_log
 
     results: list[JobResult] = []
     if cfg.mode == "api" and cfg.skip_existing:
