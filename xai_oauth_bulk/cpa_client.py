@@ -58,9 +58,21 @@ class CPAClient:
     def _url(self, path: str) -> str:
         return urljoin(self.base_url, path.lstrip("/"))
 
-    def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _request_json(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        require_dict: bool = True,
+    ) -> dict[str, Any]:
         try:
-            resp = self.session.get(self._url(path), params=params, timeout=self.timeout)
+            resp = self.session.request(
+                method,
+                self._url(path),
+                params=params,
+                timeout=self.timeout,
+            )
         except requests.RequestException as e:
             raise CPAClientError(f"request failed: {e}") from e
         try:
@@ -69,24 +81,17 @@ class CPAClient:
             body = {"raw": resp.text}
         if resp.status_code >= 400:
             raise CPAClientError(f"HTTP {resp.status_code}: {body}")
-        if not isinstance(body, dict):
+        if isinstance(body, dict):
+            return body
+        if require_dict:
             raise CPAClientError(f"unexpected response: {body!r}")
-        return body
+        return {"status": "ok", "raw": body}
+
+    def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self._request_json("GET", path, params=params, require_dict=True)
 
     def _delete(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        try:
-            resp = self.session.delete(self._url(path), params=params, timeout=self.timeout)
-        except requests.RequestException as e:
-            raise CPAClientError(f"request failed: {e}") from e
-        try:
-            body = resp.json()
-        except ValueError:
-            body = {"raw": resp.text}
-        if resp.status_code >= 400:
-            raise CPAClientError(f"HTTP {resp.status_code}: {body}")
-        if not isinstance(body, dict):
-            return {"status": "ok", "raw": body}
-        return body
+        return self._request_json("DELETE", path, params=params, require_dict=False)
 
     def start_xai_oauth(self) -> DeviceStartResult:
         """GET /v0/management/xai-auth-url"""

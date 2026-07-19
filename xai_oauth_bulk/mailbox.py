@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from html import unescape
 import random
 import re
 import secrets
 import string
 import time
+from dataclasses import dataclass
+from html import unescape
 from typing import Any, Callable, Mapping, Protocol
 
 import requests
-
 
 DUCKMAIL_API_BASE = "https://api.duckmail.sbs"
 YYDS_API_BASE = "https://maliapi.215.im/v1"
@@ -200,26 +199,59 @@ class DuckMailProvider(_Provider):
         return {"Authorization": f"Bearer {value}"} if value else {}
 
     def provision(self) -> Mailbox:
-        domains = _items(self._json(self._request("GET", f"{self.config.duckmail_api_base}/domains", headers=self._headers())))
+        domains = _items(
+            self._json(
+                self._request(
+                    "GET",
+                    f"{self.config.duckmail_api_base}/domains",
+                    headers=self._headers(),
+                )
+            )
+        )
         verified = [item for item in domains if item.get("isVerified") and item.get("domain")]
         private = [item for item in verified if item.get("ownerId")]
-        candidate = (private or verified)
+        candidate = private or verified
         if not candidate:
             raise MailboxError("DuckMail returned no verified domains")
         address = f"{_username()}@{candidate[0]['domain']}"
         password = secrets.token_urlsafe(18)
-        self._request("POST", f"{self.config.duckmail_api_base}/accounts", json={"address": address, "password": password, "expiresIn": 0}, headers={"Content-Type": "application/json", **self._headers()})
-        payload = self._json(self._request("POST", f"{self.config.duckmail_api_base}/token", json={"address": address, "password": password}))
+        self._request(
+            "POST",
+            f"{self.config.duckmail_api_base}/accounts",
+            json={"address": address, "password": password, "expiresIn": 0},
+            headers={"Content-Type": "application/json", **self._headers()},
+        )
+        payload = self._json(
+            self._request(
+                "POST",
+                f"{self.config.duckmail_api_base}/token",
+                json={"address": address, "password": password},
+            )
+        )
         token = payload.get("token") if isinstance(payload, dict) else None
         if not isinstance(token, str) or not token:
             raise MailboxError("DuckMail did not return a mailbox token")
         return Mailbox(self.name, address, token)
 
     def messages(self, mailbox: Mailbox) -> list[dict[str, Any]]:
-        return _items(self._json(self._request("GET", f"{self.config.duckmail_api_base}/messages", headers=self._headers(mailbox.token))))
+        return _items(
+            self._json(
+                self._request(
+                    "GET",
+                    f"{self.config.duckmail_api_base}/messages",
+                    headers=self._headers(mailbox.token),
+                )
+            )
+        )
 
     def message_detail(self, mailbox: Mailbox, message_id: str) -> dict[str, Any]:
-        payload = self._json(self._request("GET", f"{self.config.duckmail_api_base}/messages/{message_id}", headers=self._headers(mailbox.token)))
+        payload = self._json(
+            self._request(
+                "GET",
+                f"{self.config.duckmail_api_base}/messages/{message_id}",
+                headers=self._headers(mailbox.token),
+            )
+        )
         return payload if isinstance(payload, dict) else {}
 
 
@@ -250,7 +282,11 @@ class CloudflareProvider(_Provider):
 
     def provision(self) -> Mailbox:
         path = self.config.cloudflare_path_accounts
-        domain = random.choice(self.config.cloudflare_domains) if self.config.cloudflare_domains else ""
+        domain = (
+            random.choice(self.config.cloudflare_domains)
+            if self.config.cloudflare_domains
+            else ""
+        )
         if path.rstrip("/").lower() == "/admin/new_address":
             payload: dict[str, Any] = {"name": _username(), "enablePrefix": True}
             if domain:
@@ -259,25 +295,47 @@ class CloudflareProvider(_Provider):
         else:
             payload = {"domain": domain} if domain else {}
             headers = {"Content-Type": "application/json"}
-        response = self._request("POST", f"{self.config.cloudflare_api_base}{path}", json=payload, headers=headers, params=self._params())
+        response = self._request(
+            "POST",
+            f"{self.config.cloudflare_api_base}{path}",
+            json=payload,
+            headers=headers,
+            params=self._params(),
+        )
         data = self._json(response)
         address = data.get("address") if isinstance(data, dict) else None
         token = data.get("jwt") if isinstance(data, dict) else None
-        if not isinstance(address, str) or not address or not isinstance(token, str) or not token:
+        if (
+            not isinstance(address, str)
+            or not address
+            or not isinstance(token, str)
+            or not token
+        ):
             raise MailboxError("Cloudflare new-address response lacks address or jwt")
         return Mailbox(self.name, address, token)
 
     def messages(self, mailbox: Mailbox) -> list[dict[str, Any]]:
-        response = self._request("GET", f"{self.config.cloudflare_api_base}{self.config.cloudflare_path_messages}", headers={"Authorization": f"Bearer {mailbox.token}"}, params=self._params({"limit": 20, "offset": 0}))
+        response = self._request(
+            "GET",
+            f"{self.config.cloudflare_api_base}{self.config.cloudflare_path_messages}",
+            headers={"Authorization": f"Bearer {mailbox.token}"},
+            params=self._params({"limit": 20, "offset": 0}),
+        )
         return _items(self._json(response))
 
     def message_detail(self, mailbox: Mailbox, message_id: str) -> dict[str, Any]:
         headers = {"Authorization": f"Bearer {mailbox.token}"}
-        urls = (f"{self.config.cloudflare_api_base}/api/mail/{message_id}", f"{self.config.cloudflare_api_base}{self.config.cloudflare_path_messages}/{message_id}")
+        base = self.config.cloudflare_api_base
+        urls = (
+            f"{base}/api/mail/{message_id}",
+            f"{base}{self.config.cloudflare_path_messages}/{message_id}",
+        )
         last_error: MailboxError | None = None
         for url in urls:
             try:
-                payload = self._json(self._request("GET", url, headers=headers, params=self._params()))
+                payload = self._json(
+                    self._request("GET", url, headers=headers, params=self._params())
+                )
                 if isinstance(payload, dict) and isinstance(payload.get("data"), dict):
                     return payload["data"]
                 return payload if isinstance(payload, dict) else {}
@@ -301,37 +359,106 @@ class YYDSProvider(_Provider):
     def provision(self) -> Mailbox:
         if not self.config.yyds_jwt and not self.config.yyds_api_key:
             raise MailboxError("yyds_api_key or yyds_jwt is required for the YYDS provider")
-        raw_domains = self._json(self._request("GET", f"{self.config.yyds_api_base}/domains", headers=self._headers()))
-        domains = raw_domains.get("data", []) if isinstance(raw_domains, dict) and raw_domains.get("success") else []
-        verified = [item for item in domains if isinstance(item, dict) and item.get("isVerified") and str(item.get("domain", "")).lower() not in self.config.yyds_blocked_domains]
-        preferred = {name: item for item in verified for name in [str(item.get("domain", "")).lower()]}
-        selected = next((preferred[name] for name in self.config.yyds_preferred_domains if name in preferred), None)
+        raw_domains = self._json(
+            self._request(
+                "GET",
+                f"{self.config.yyds_api_base}/domains",
+                headers=self._headers(),
+            )
+        )
+        domains = (
+            raw_domains.get("data", [])
+            if isinstance(raw_domains, dict) and raw_domains.get("success")
+            else []
+        )
+        verified = [
+            item
+            for item in domains
+            if isinstance(item, dict)
+            and item.get("isVerified")
+            and str(item.get("domain", "")).lower() not in self.config.yyds_blocked_domains
+        ]
+        preferred = {
+            str(item.get("domain", "")).lower(): item
+            for item in verified
+        }
+        selected = next(
+            (
+                preferred[name]
+                for name in self.config.yyds_preferred_domains
+                if name in preferred
+            ),
+            None,
+        )
         if selected is None:
             private = [item for item in verified if not item.get("isPublic")]
             public = [item for item in verified if item.get("isPublic")]
             choices = private or public or verified
             if not choices:
                 raise MailboxError("YYDS returned no usable verified domains")
-            selected = random.choice(choices) if self.config.yyds_domain_selection == "random" else choices[0]
+            selected = (
+                random.choice(choices)
+                if self.config.yyds_domain_selection == "random"
+                else choices[0]
+            )
         username = _username()
-        payload = self._json(self._request("POST", f"{self.config.yyds_api_base}/accounts", json={"address": username, "domain": selected["domain"]}, headers=self._headers(content_type=True)))
-        data = payload.get("data", {}) if isinstance(payload, dict) and payload.get("success") else {}
+        payload = self._json(
+            self._request(
+                "POST",
+                f"{self.config.yyds_api_base}/accounts",
+                json={"address": username, "domain": selected["domain"]},
+                headers=self._headers(content_type=True),
+            )
+        )
+        data = (
+            payload.get("data", {})
+            if isinstance(payload, dict) and payload.get("success")
+            else {}
+        )
         address = data.get("address") or f"{username}@{selected['domain']}"
         token = data.get("token")
         if not token:
-            token_payload = self._json(self._request("POST", f"{self.config.yyds_api_base}/token", json={"address": address}, headers=self._headers(content_type=True)))
-            token = token_payload.get("data", {}).get("token") if isinstance(token_payload, dict) and token_payload.get("success") else None
+            token_payload = self._json(
+                self._request(
+                    "POST",
+                    f"{self.config.yyds_api_base}/token",
+                    json={"address": address},
+                    headers=self._headers(content_type=True),
+                )
+            )
+            token = (
+                token_payload.get("data", {}).get("token")
+                if isinstance(token_payload, dict) and token_payload.get("success")
+                else None
+            )
         if not isinstance(token, str) or not token:
             raise MailboxError("YYDS did not return a mailbox token")
         return Mailbox(self.name, str(address), token)
 
     def messages(self, mailbox: Mailbox) -> list[dict[str, Any]]:
-        payload = self._json(self._request("GET", f"{self.config.yyds_api_base}/messages", params={"address": mailbox.address}, headers=self._headers(mailbox.token)))
+        payload = self._json(
+            self._request(
+                "GET",
+                f"{self.config.yyds_api_base}/messages",
+                params={"address": mailbox.address},
+                headers=self._headers(mailbox.token),
+            )
+        )
         return _items(payload)
 
     def message_detail(self, mailbox: Mailbox, message_id: str) -> dict[str, Any]:
-        payload = self._json(self._request("GET", f"{self.config.yyds_api_base}/messages/{message_id}", headers=self._headers(mailbox.token)))
-        if isinstance(payload, dict) and payload.get("success") and isinstance(payload.get("data"), dict):
+        payload = self._json(
+            self._request(
+                "GET",
+                f"{self.config.yyds_api_base}/messages/{message_id}",
+                headers=self._headers(mailbox.token),
+            )
+        )
+        if (
+            isinstance(payload, dict)
+            and payload.get("success")
+            and isinstance(payload.get("data"), dict)
+        ):
             return payload["data"]
         return payload if isinstance(payload, dict) else {}
 
@@ -339,7 +466,14 @@ class YYDSProvider(_Provider):
 class MailboxService:
     """Provisions one configured mailbox provider and waits for one code."""
 
-    def __init__(self, config: MailboxConfig | Mapping[str, Any] | Any, *, session: requests.Session | None = None, clock: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep) -> None:
+    def __init__(
+        self,
+        config: MailboxConfig | Mapping[str, Any] | Any,
+        *,
+        session: requests.Session | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
         if isinstance(config, MailboxConfig):
             self.config = config
         elif isinstance(config, Mapping):
@@ -349,7 +483,11 @@ class MailboxService:
         self.session = session or requests.Session()
         self.clock = clock
         self.sleep = sleep
-        providers: dict[str, type[_Provider]] = {"duckmail": DuckMailProvider, "cloudflare": CloudflareProvider, "yyds": YYDSProvider}
+        providers: dict[str, type[_Provider]] = {
+            "duckmail": DuckMailProvider,
+            "cloudflare": CloudflareProvider,
+            "yyds": YYDSProvider,
+        }
         provider_cls = providers.get(self.config.provider)
         if provider_cls is None:
             raise MailboxError(f"unsupported email provider: {self.config.provider!r}")
@@ -420,10 +558,15 @@ class MailboxService:
                 code = extract_verification_code(text, subject)
                 if code:
                     if log:
-                        log(f"verified mailbox email received (message={message_id}); code extracted")
+                        log(
+                            "verified mailbox email received "
+                            f"(message={message_id}); code extracted"
+                        )
                     return code
             remaining = deadline - self.clock()
             if remaining <= 0:
                 break
             self.sleep(min(interval, remaining))
-        raise VerificationCodeTimeout(f"{self.provider.name} did not receive a verification code within {timeout:g}s")
+        raise VerificationCodeTimeout(
+            f"{self.provider.name} did not receive a verification code within {timeout:g}s"
+        )

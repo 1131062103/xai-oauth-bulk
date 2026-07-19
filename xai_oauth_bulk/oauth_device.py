@@ -72,7 +72,7 @@ def discover(proxy: str | None = None, timeout: float = 30.0) -> tuple[str, str]
         resp = s.get(DISCOVERY_URL, timeout=timeout)
         resp.raise_for_status()
         body = resp.json()
-    except Exception as e:
+    except Exception:
         # fall back to known endpoints
         return DEVICE_CODE_URL, TOKEN_URL
     device_ep = str(body.get("device_authorization_endpoint") or DEVICE_CODE_URL).strip()

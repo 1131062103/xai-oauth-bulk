@@ -32,7 +32,10 @@ def build_registration_profile(password_length: int = 20) -> RegistrationProfile
         secrets.choice(string.digits),
         secrets.choice("!@#$%^&*_-"),
     ]
-    remaining = [secrets.choice(_PASSWORD_ALPHABET) for _ in range(password_length - len(required))]
+    remaining = [
+        secrets.choice(_PASSWORD_ALPHABET)
+        for _ in range(password_length - len(required))
+    ]
     chars = required + remaining
     secrets.SystemRandom().shuffle(chars)
     return RegistrationProfile(

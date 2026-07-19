@@ -79,7 +79,7 @@ duckmail_api_base: https://api.duckmail.su
 duckmail_api_key: ""
 
 # YYDS provider.
-yyds_api_base: ""
+yyds_api_base: "https://maliapi.215.im/v1"
 yyds_api_key: ""
 yyds_jwt: ""
 yyds_preferred_domains: "" # optional comma-separated domain names
