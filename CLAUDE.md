@@ -79,7 +79,7 @@ Browser stack:
 - `browser/flow.py` — large RPA module: login consent (`approve_device_code`) and registration (`register_account`). After registration, OAuth must call `approve_device_code(..., reopen=False)` so the authenticated session keeps the in-tab Continue → Allow handoff (do not reload the device URI).
 - `browser/turnstile.py` — waits for Turnstile and uses ordinary widget interaction only; operators may need to complete a checkbox manually in the headed window.
 
-Registration pipeline (per account): provision mailbox (`mailbox.py`: cloudflare / duckmail / yyds) → `registration.build_registration_profile` → start device/CPA OAuth in parallel with browser sign-up → on browser success immediately `account_ledger.save_registered_account` (`status=registered`) → in-session `approve_device_code(reopen=False)` → on OAuth success append ledger `status=oauth_ok`. Early credential save ensures OAuth failure does not lose the new account. Registration skips CPA duplicate precheck (no email exists beforehand); API mode still needs `cpa_management_key`.
+Registration pipeline (per account): provision mailbox (`mailbox.py`: cloudflare / duckmail / yyds) → domain filter (`mailbox_blocked_domains_file` / `mailbox_blocked_domains`; suffix match, re-provision up to `mailbox_domain_filter_max_attempts`) → `registration.build_registration_profile` → start device/CPA OAuth in parallel with browser sign-up → on browser success immediately `account_ledger.save_registered_account` (`status=registered`) → in-session `approve_device_code(reopen=False)` → on OAuth success append ledger `status=oauth_ok`. Early credential save ensures OAuth failure does not lose the new account. Registration skips CPA duplicate precheck (no email exists beforehand); API mode still needs `cpa_management_key`.
 
 ## Configuration and outputs
 
@@ -94,6 +94,7 @@ Account input: `email:password` or `email,password`; blank lines and `#` comment
 | `output/failed.jsonl` | failed jobs |
 | `output/accounts.jsonl` | registration ledger (`registered` then optional `oauth_ok`) |
 | `output/accounts-registered.txt` | `email:password` lines for later file-mode reuse |
+| `blocked_domains.txt` | optional registration mailbox domain blocklist (see `blocked_domains.example.txt`) |
 
 Treat ledger/credentials files as secrets. They store generated email/password (and names), not mailbox tokens, verification codes, or OAuth tokens. `config.yaml`, `accounts.txt`, and `output/` are gitignored.
 

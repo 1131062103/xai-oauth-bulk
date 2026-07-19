@@ -64,6 +64,14 @@ mailbox_poll_timeout_sec: 180
 mailbox_poll_interval_sec: 3
 mailbox_max_retries: 2
 
+# Reject provisioned addresses whose domain matches a rule exactly or as a
+# subdomain (e.g. dpdns.org blocks v720f8y9y5@xx.lucky04.dpdns.org).
+# File: one domain per line (# comments allowed). Missing file = no filter.
+# Inline list is optional and merges with the file.
+mailbox_blocked_domains_file: blocked_domains.txt
+mailbox_blocked_domains: "" # optional comma-separated extras
+mailbox_domain_filter_max_attempts: 10
+
 # Cloudflare Temp Mail-compatible provider.
 # Supply an authorized endpoint and credential for your deployment.
 cloudflare_api_base: "" # e.g. https://mail.example.internal

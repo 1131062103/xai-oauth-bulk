@@ -1,0 +1,10 @@
+# Domains (and their subdomains) rejected during registration mailbox provisioning.
+# One rule per line. Matching is case-insensitive exact or suffix:
+#   dpdns.org  blocks  dpdns.org and xx.lucky04.dpdns.org
+# Blank lines and # comments are ignored.
+
+xx.lucky04.dpdns.org
+qzz.io
+indevs.in
+908209381.shop
+qwen3-30b-a3b.xyz

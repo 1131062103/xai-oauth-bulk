@@ -291,7 +291,7 @@ def _provision_registration_mailbox(
     last_error: Exception | None = None
     for attempt in range(1, cfg.mailbox_max_retries + 1):
         try:
-            return service, service.provision()
+            return service, service.provision(log=log)
         except Exception as e:  # noqa: BLE001
             last_error = e
             if attempt < cfg.mailbox_max_retries:

@@ -9,7 +9,8 @@ import string
 import time
 from dataclasses import dataclass
 from html import unescape
-from typing import Any, Callable, Mapping, Protocol
+from pathlib import Path
+from typing import Any, Callable, Iterable, Mapping, Protocol
 
 import requests
 
@@ -38,6 +39,8 @@ class MailboxConfig:
     request_timeout_sec: float = 15.0
     poll_timeout_sec: float = 180.0
     poll_interval_sec: float = 3.0
+    domain_filter_max_attempts: int = 10
+    blocked_domains: tuple[str, ...] = ()
     duckmail_api_base: str = DUCKMAIL_API_BASE
     duckmail_api_key: str = ""
     cloudflare_api_base: str = ""
@@ -74,11 +77,31 @@ class MailboxConfig:
             except (TypeError, ValueError):
                 return default
 
+        def integer(name: str, default: int) -> int:
+            try:
+                return max(int(values.get(name, default)), 1)
+            except (TypeError, ValueError):
+                return default
+
+        blocked = names("mailbox_blocked_domains") or names("blocked_domains")
+        blocked_file = text("mailbox_blocked_domains_file") or text("blocked_domains_file")
+        if blocked_file:
+            blocked = tuple(
+                dict.fromkeys(
+                    (*blocked, *load_blocked_domains_file(blocked_file))
+                )
+            )
+
         return cls(
             provider=(text("mailbox_provider") or text("email_provider", "duckmail")).lower(),
             request_timeout_sec=number("mailbox_request_timeout_sec", 15.0),
             poll_timeout_sec=number("mailbox_poll_timeout_sec", 180.0),
             poll_interval_sec=number("mailbox_poll_interval_sec", 3.0),
+            domain_filter_max_attempts=integer(
+                "mailbox_domain_filter_max_attempts",
+                integer("domain_filter_max_attempts", 10),
+            ),
+            blocked_domains=blocked,
             duckmail_api_base=text("duckmail_api_base", DUCKMAIL_API_BASE).rstrip("/"),
             duckmail_api_key=text("duckmail_api_key"),
             cloudflare_api_base=text("cloudflare_api_base").rstrip("/"),
@@ -96,6 +119,87 @@ class MailboxConfig:
             yyds_blocked_domains=names("yyds_blocked_domains"),
             yyds_domain_selection=text("yyds_domain_selection", "random").lower(),
         )
+
+
+def normalize_domain(value: str) -> str:
+    """Normalize a domain or rule (strip whitespace, leading @/., lowercase)."""
+    return str(value or "").strip().lower().lstrip("@.")
+
+
+def email_domain(address: str) -> str:
+    """Return the domain part of an email address, or empty string if invalid."""
+    text = str(address or "").strip().lower()
+    if "@" not in text:
+        return ""
+    return normalize_domain(text.rsplit("@", 1)[-1])
+
+
+def domain_is_blocked(domain: str, blocked: Iterable[str]) -> bool:
+    """True when domain matches a blocked rule exactly or as a subdomain suffix.
+
+    Examples (rule ``dpdns.org``):
+    - ``dpdns.org`` → blocked
+    - ``xx.lucky04.dpdns.org`` → blocked
+    - ``example.com`` → allowed
+    """
+    domain = normalize_domain(domain)
+    if not domain:
+        return False
+    for raw in blocked:
+        rule = normalize_domain(raw)
+        if not rule:
+            continue
+        if domain == rule or domain.endswith("." + rule):
+            return True
+    return False
+
+
+def load_blocked_domains_file(path: str | Path, *, missing_ok: bool = True) -> tuple[str, ...]:
+    """Load one domain rule per line from a text file (# comments, blank lines ignored).
+
+    When missing_ok is True (default), a missing path yields an empty rule set so
+    operators can omit the file until they need filtering.
+    """
+    file_path = Path(path).expanduser()
+    if not file_path.is_file():
+        if missing_ok:
+            return ()
+        raise MailboxError(f"blocked domains file not found: {file_path}")
+    rules: list[str] = []
+    seen: set[str] = set()
+    with file_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            text = line.strip()
+            if not text or text.startswith("#"):
+                continue
+            # Allow optional trailing comments: domain.example  # note
+            if "#" in text:
+                text = text.split("#", 1)[0].strip()
+            rule = normalize_domain(text)
+            if rule and rule not in seen:
+                seen.add(rule)
+                rules.append(rule)
+    return tuple(rules)
+
+
+def _all_blocked_domains(config: MailboxConfig) -> tuple[str, ...]:
+    """Merge provider-specific and global blocked domain rules (deduped, order-preserving)."""
+    return tuple(
+        dict.fromkeys(
+            (
+                *config.blocked_domains,
+                *config.yyds_blocked_domains,
+            )
+        )
+    )
+
+
+def _filter_domain_names(domains: Iterable[str], blocked: Iterable[str]) -> tuple[str, ...]:
+    return tuple(
+        domain
+        for domain in (normalize_domain(item) for item in domains)
+        if domain and not domain_is_blocked(domain, blocked)
+    )
 
 
 def _path(value: str) -> str:
@@ -208,7 +312,14 @@ class DuckMailProvider(_Provider):
                 )
             )
         )
-        verified = [item for item in domains if item.get("isVerified") and item.get("domain")]
+        blocked = _all_blocked_domains(self.config)
+        verified = [
+            item
+            for item in domains
+            if item.get("isVerified")
+            and item.get("domain")
+            and not domain_is_blocked(str(item.get("domain", "")), blocked)
+        ]
         private = [item for item in verified if item.get("ownerId")]
         candidate = private or verified
         if not candidate:
@@ -282,11 +393,11 @@ class CloudflareProvider(_Provider):
 
     def provision(self) -> Mailbox:
         path = self.config.cloudflare_path_accounts
-        domain = (
-            random.choice(self.config.cloudflare_domains)
-            if self.config.cloudflare_domains
-            else ""
-        )
+        blocked = _all_blocked_domains(self.config)
+        allowed_domains = _filter_domain_names(self.config.cloudflare_domains, blocked)
+        if self.config.cloudflare_domains and not allowed_domains:
+            raise MailboxError("Cloudflare domains are all blocked by domain filter")
+        domain = random.choice(allowed_domains) if allowed_domains else ""
         if path.rstrip("/").lower() == "/admin/new_address":
             payload: dict[str, Any] = {"name": _username(), "enablePrefix": True}
             if domain:
@@ -371,12 +482,13 @@ class YYDSProvider(_Provider):
             if isinstance(raw_domains, dict) and raw_domains.get("success")
             else []
         )
+        blocked = _all_blocked_domains(self.config)
         verified = [
             item
             for item in domains
             if isinstance(item, dict)
             and item.get("isVerified")
-            and str(item.get("domain", "")).lower() not in self.config.yyds_blocked_domains
+            and not domain_is_blocked(str(item.get("domain", "")), blocked)
         ]
         preferred = {
             str(item.get("domain", "")).lower(): item
@@ -493,8 +605,33 @@ class MailboxService:
             raise MailboxError(f"unsupported email provider: {self.config.provider!r}")
         self.provider: MailboxProvider = provider_cls(self.config, self.session)
 
-    def provision(self) -> Mailbox:
-        return self.provider.provision()
+    def provision(
+        self,
+        *,
+        log: Callable[[str], None] | None = None,
+    ) -> Mailbox:
+        """Provision a mailbox, re-fetching when the address domain is blocked."""
+        blocked = _all_blocked_domains(self.config)
+        if not blocked:
+            return self.provider.provision()
+
+        attempts = max(int(self.config.domain_filter_max_attempts), 1)
+        last_address = ""
+        for attempt in range(1, attempts + 1):
+            mailbox = self.provider.provision()
+            last_address = mailbox.address
+            domain = email_domain(mailbox.address)
+            if not domain_is_blocked(domain, blocked):
+                return mailbox
+            if log:
+                log(
+                    "mailbox domain filtered "
+                    f"({mailbox.address}); re-fetch {attempt}/{attempts}"
+                )
+        raise MailboxError(
+            "mailbox domain filter rejected all provisioned addresses "
+            f"after {attempts} attempt(s); last={last_address or '?'}"
+        )
 
     def wait_for_code(
         self,

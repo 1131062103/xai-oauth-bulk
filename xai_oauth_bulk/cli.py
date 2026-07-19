@@ -116,6 +116,11 @@ def main(argv: list[str] | None = None) -> int:
         cfg.fail_log = str(tool_root / cfg.fail_log)
     if not Path(cfg.account_ledger_path).is_absolute():
         cfg.account_ledger_path = str(tool_root / cfg.account_ledger_path)
+    if cfg.mailbox_blocked_domains_file and not Path(cfg.mailbox_blocked_domains_file).is_absolute():
+        # Prefer tool-root path when present; otherwise keep relative for CWD-based resolution.
+        cand = tool_root / cfg.mailbox_blocked_domains_file
+        if cand.is_file() or not (Path.cwd() / cfg.mailbox_blocked_domains_file).is_file():
+            cfg.mailbox_blocked_domains_file = str(cand)
 
     results = run_batch(cfg)
     failed = [r for r in results if not r.ok]

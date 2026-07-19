@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 from xai_oauth_bulk.mailbox import (
     Mailbox,
     MailboxConfig,
+    MailboxError,
     MailboxService,
     VerificationCodeTimeout,
+    domain_is_blocked,
+    email_domain,
     extract_verification_code,
+    load_blocked_domains_file,
 )
 
 
@@ -109,6 +115,105 @@ class MailboxTests(unittest.TestCase):
         service = MailboxService(MailboxConfig(poll_timeout_sec=2, poll_interval_sec=1), session=session, clock=clock, sleep=sleep)
         with self.assertRaises(VerificationCodeTimeout):
             service.wait_for_code(Mailbox("duckmail", "a@test", "token"))
+
+    def test_domain_is_blocked_matches_exact_and_subdomain_suffix(self):
+        blocked = ("dpdns.org", "spam.test")
+        self.assertTrue(domain_is_blocked("dpdns.org", blocked))
+        self.assertTrue(domain_is_blocked("xx.lucky04.dpdns.org", blocked))
+        self.assertTrue(domain_is_blocked("SPAM.TEST", blocked))
+        self.assertFalse(domain_is_blocked("example.com", blocked))
+        self.assertFalse(domain_is_blocked("notdpdns.org", blocked))
+        self.assertEqual(email_domain("v720f8y9y5@xx.lucky04.dpdns.org"), "xx.lucky04.dpdns.org")
+
+    def test_load_blocked_domains_file_ignores_comments_and_missing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "blocked.txt"
+            path.write_text(
+                "# comment\n\ndpdns.org  # note\n@Bad.Example\n.dpdns.org\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                load_blocked_domains_file(path),
+                ("dpdns.org", "bad.example"),
+            )
+            self.assertEqual(load_blocked_domains_file(Path(temp_dir) / "missing.txt"), ())
+
+    def test_config_merges_blocked_domains_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "blocked.txt"
+            path.write_text("dpdns.org\n", encoding="utf-8")
+            config = MailboxConfig.from_mapping(
+                {
+                    "mailbox_provider": "duckmail",
+                    "mailbox_blocked_domains": "extra.test",
+                    "mailbox_blocked_domains_file": str(path),
+                }
+            )
+        self.assertEqual(config.blocked_domains, ("extra.test", "dpdns.org"))
+
+    def test_provision_refetches_when_address_domain_is_blocked(self):
+        session = Mock()
+        service = MailboxService(
+            MailboxConfig(
+                provider="duckmail",
+                blocked_domains=("dpdns.org",),
+                domain_filter_max_attempts=5,
+            ),
+            session=session,
+        )
+        service.provider = Mock()
+        service.provider.provision.side_effect = [
+            Mailbox("duckmail", "v720f8y9y5@xx.lucky04.dpdns.org", "t1"),
+            Mailbox("duckmail", "ok@mail.test", "t2"),
+        ]
+        logs: list[str] = []
+
+        mailbox = service.provision(log=logs.append)
+
+        self.assertEqual(mailbox, Mailbox("duckmail", "ok@mail.test", "t2"))
+        self.assertEqual(service.provider.provision.call_count, 2)
+        self.assertTrue(any("domain filtered" in line for line in logs))
+
+    def test_provision_raises_when_all_addresses_filtered(self):
+        session = Mock()
+        service = MailboxService(
+            MailboxConfig(
+                provider="duckmail",
+                blocked_domains=("dpdns.org",),
+                domain_filter_max_attempts=2,
+            ),
+            session=session,
+        )
+        service.provider = Mock()
+        service.provider.provision.return_value = Mailbox(
+            "duckmail", "a@xx.lucky04.dpdns.org", "t"
+        )
+        with self.assertRaisesRegex(MailboxError, "domain filter rejected"):
+            service.provision()
+
+    def test_duckmail_skips_blocked_domains_before_create(self):
+        session = session_with(
+            {
+                "hydra:member": [
+                    {"domain": "xx.lucky04.dpdns.org", "isVerified": True},
+                    {"domain": "mail.test", "isVerified": True},
+                ]
+            },
+            {},
+            {"token": "mail-token"},
+        )
+        service = MailboxService(
+            {
+                "email_provider": "duckmail",
+                "duckmail_api_base": "https://duck.test",
+                "mailbox_blocked_domains": "dpdns.org",
+            },
+            session=session,
+        )
+        mailbox = service.provision()
+        self.assertTrue(mailbox.address.endswith("@mail.test"))
+        create_call = session.request.call_args_list[1]
+        self.assertTrue(create_call.kwargs["json"]["address"].endswith("@mail.test"))
 
 
 if __name__ == "__main__":

@@ -108,8 +108,9 @@ Registration is deliberately **opt-in** and is only for accounts you own or are 
 1. Copy the example configuration and choose one mailbox provider you are authorized to use: `cloudflare`, `duckmail`, or `yyds`.
 2. Set `account_source: register`, `registration_enabled: true`, a nonzero `register_count`, and `mailbox_provider` in `config.yaml`.
 3. Fill the corresponding provider endpoint and credential placeholders. Do not commit those secrets.
-4. Keep `workers: 1` and `headless: false`. Registration rejects parallel workers; a visible browser lets the operator handle any Turnstile challenge normally.
-5. Run a small, authorized batch first:
+4. Optional: copy `blocked_domains.example.txt` to `blocked_domains.txt` and list domains to reject (suffix match; e.g. `dpdns.org` blocks `v720f8y9y5@xx.lucky04.dpdns.org`). Filtered addresses are re-provisioned up to `mailbox_domain_filter_max_attempts`.
+5. Keep `workers: 1` and `headless: false`. Registration rejects parallel workers; a visible browser lets the operator handle any Turnstile challenge normally.
+6. Run a small, authorized batch first:
 
 ```bash
 python run.py --config config.yaml --account-source register --enable-registration --register-count 1 --headed
@@ -126,6 +127,7 @@ The provider settings in `config.example.yaml` are placeholders for deployments 
 - **Cloudflare:** set `cloudflare_api_base`, `cloudflare_api_key`, and the matching `cloudflare_auth_mode`; customize the four endpoint paths only if your compatible service uses different routes.
 - **DuckMail:** set `duckmail_api_base` and, if required by the authorized service, `duckmail_api_key`.
 - **YYDS:** set `yyds_api_base` and either `yyds_api_key` or `yyds_jwt`. Optional comma-separated preferred and blocked domain lists are supported.
+- **Domain filter (all providers):** `mailbox_blocked_domains_file` (default `blocked_domains.txt`) and/or `mailbox_blocked_domains` (comma-separated). Rules match exact domains and subdomains. A missing file is treated as an empty filter.
 
 No provider credentials, mailbox tokens, or verification codes are written to the account ledger.
 

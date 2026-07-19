@@ -35,6 +35,11 @@ class Config:
     mailbox_poll_timeout_sec: float = 180.0
     mailbox_poll_interval_sec: float = 3.0
     mailbox_max_retries: int = 2
+    # Domain blocklist for registration mailboxes (file and/or comma-separated).
+    # Matching is exact or subdomain-suffix (e.g. dpdns.org matches xx.lucky04.dpdns.org).
+    mailbox_blocked_domains_file: str = "blocked_domains.txt"
+    mailbox_blocked_domains: str = ""
+    mailbox_domain_filter_max_attempts: int = 10
     account_ledger_path: str = "output/accounts.jsonl"
 
     # Cloudflare Temp Mail provider.
@@ -102,6 +107,14 @@ def load_config(path: str | Path | None = None, **overrides: Any) -> Config:
     cfg.workers = max(int(cfg.workers or 1), 1)
     cfg.register_count = max(int(cfg.register_count or 0), 0)
     cfg.mailbox_max_retries = max(int(cfg.mailbox_max_retries or 1), 1)
+    cfg.mailbox_blocked_domains_file = (cfg.mailbox_blocked_domains_file or "").strip()
+    cfg.mailbox_blocked_domains = (cfg.mailbox_blocked_domains or "").strip()
+    try:
+        cfg.mailbox_domain_filter_max_attempts = max(
+            int(cfg.mailbox_domain_filter_max_attempts or 10), 1
+        )
+    except (TypeError, ValueError):
+        cfg.mailbox_domain_filter_max_attempts = 10
     return cfg
 
 
